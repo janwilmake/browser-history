@@ -1,0 +1,20 @@
+{
+  "$schema": "https://unpkg.com/wrangler@latest/config-schema.json",
+  "name": "website-time-tracker-x-auth",
+  "compatibility_date": "2025-01-01",
+  "main": "worker.ts",
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "USER_STATS",
+        "class_name": "UserStats"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["UserStats"]
+    }
+  ]
+}
