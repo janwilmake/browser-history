@@ -1,4 +1,4 @@
-# Automate The Standup - An AI Agent That Shares Things You're Working On With Your Team
+# An AI Agent That Shares Things You're Working On With Your Team
 
 Why
 
