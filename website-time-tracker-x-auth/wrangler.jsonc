@@ -16,5 +16,6 @@
       "tag": "v1",
       "new_sqlite_classes": ["UserStats"]
     }
-  ]
+  ],
+  "routes": [{ "custom_domain": true, "pattern": "history.wilmake.com" }]
 }

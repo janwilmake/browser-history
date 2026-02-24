@@ -2,6 +2,7 @@
 let activeTabId = null;
 let startTime = null;
 let currentUrl = null;
+let currentTitle = null;
 
 // Interval for periodic session saves (to survive service worker suspension)
 let saveInterval = null;
@@ -14,9 +15,10 @@ async function saveTrackingSession() {
       trackingSession: {
         tabId: activeTabId,
         url: currentUrl,
+        title: currentTitle,
         startTime: startTime,
-        lastSavedAt: Date.now(),
-      },
+        lastSavedAt: Date.now()
+      }
     });
   }
 }
@@ -37,7 +39,7 @@ async function restoreTrackingSession() {
       const tab = await chrome.tabs.get(session.tabId);
       const [activeTab] = await chrome.tabs.query({
         active: true,
-        currentWindow: true,
+        currentWindow: true
       });
 
       // If the saved tab is still the active tab with same URL, restore the session
@@ -46,8 +48,11 @@ async function restoreTrackingSession() {
         if (currentTabUrl === session.url) {
           activeTabId = session.tabId;
           currentUrl = session.url;
+          currentTitle = session.title || null;
           startTime = session.startTime;
-          console.log(`Restored tracking session: ${currentUrl}, elapsed: ${Math.floor((Date.now() - startTime) / 1000)}s`);
+          console.log(
+            `Restored tracking session: ${currentUrl}, elapsed: ${Math.floor((Date.now() - startTime) / 1000)}s`
+          );
           startPeriodicSave();
           return true;
         }
@@ -60,8 +65,15 @@ async function restoreTrackingSession() {
     const elapsedMs = session.lastSavedAt - session.startTime;
     const elapsedSeconds = Math.floor(elapsedMs / 1000);
     if (elapsedSeconds >= MIN_DURATION_SECONDS) {
-      console.log(`Sending orphaned session: ${session.url}, ${elapsedSeconds}s`);
-      await sendTrackingData(session.url, elapsedSeconds);
+      console.log(
+        `Sending orphaned session: ${session.url}, ${elapsedSeconds}s`
+      );
+      await sendTrackingData(
+        session.url,
+        elapsedSeconds,
+        session.title || "",
+        ""
+      );
     }
     await clearTrackingSession();
   }
@@ -98,8 +110,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
 // X Auth Configuration
 // IMPORTANT: Update this URL after deploying your Cloudflare Worker
-const X_AUTH_WORKER_URL =
-  "https://website-time-tracker-x-auth.wilmake.workers.dev";
+const X_AUTH_WORKER_URL = "https://history.wilmake.com";
 const CALLBACK_PATH = "/extension-callback";
 
 // Track login tab to close it after auth
@@ -126,10 +137,10 @@ async function initializeTracking() {
 
     const [tab] = await chrome.tabs.query({
       active: true,
-      currentWindow: true,
+      currentWindow: true
     });
     if (tab) {
-      startTracking(tab.id, tab.url);
+      startTracking(tab.id, tab.url, tab.title);
     }
   } catch (error) {
     console.error("Error initializing tracking:", error);
@@ -142,7 +153,7 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
 
   try {
     const tab = await chrome.tabs.get(activeInfo.tabId);
-    startTracking(tab.id, tab.url);
+    startTracking(tab.id, tab.url, tab.title);
   } catch (error) {
     console.error("Error on tab activation:", error);
   }
@@ -164,7 +175,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
       await saveXAuthData({
         jwt: jwt,
         refresh_token: url.searchParams.get("refresh_token"),
-        user: url.searchParams.get("user"),
+        user: url.searchParams.get("user")
       });
       // Close the tab after showing success
       setTimeout(() => {
@@ -187,7 +198,8 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
   // Normal tracking logic
   if (changeInfo.url && tabId === activeTabId) {
     await stopTracking();
-    startTracking(tabId, changeInfo.url);
+    const tab = await chrome.tabs.get(tabId);
+    startTracking(tabId, changeInfo.url, tab?.title);
   }
 });
 
@@ -202,10 +214,10 @@ chrome.windows.onFocusChanged.addListener(async (windowId) => {
     try {
       const [tab] = await chrome.tabs.query({
         active: true,
-        windowId: windowId,
+        windowId: windowId
       });
       if (tab) {
-        startTracking(tab.id, tab.url);
+        startTracking(tab.id, tab.url, tab.title);
       }
     } catch (error) {
       console.error("Error on window focus change:", error);
@@ -242,7 +254,22 @@ function isInternalHost(hostname) {
   return false;
 }
 
-function startTracking(tabId, url) {
+async function getPageMetaDescription(tabId) {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const meta = document.querySelector('meta[name="description"]');
+        return meta ? meta.getAttribute("content") : "";
+      }
+    });
+    return results?.[0]?.result || "";
+  } catch {
+    return "";
+  }
+}
+
+function startTracking(tabId, url, title) {
   if (
     !url ||
     url.startsWith("chrome://") ||
@@ -266,6 +293,7 @@ function startTracking(tabId, url) {
 
   activeTabId = tabId;
   currentUrl = normalizeUrl(url);
+  currentTitle = title || null;
   startTime = Date.now();
 
   // Save session to storage to survive service worker suspension
@@ -287,7 +315,16 @@ async function stopTracking() {
   const durationSeconds = Math.floor(duration / 1000);
 
   if (durationSeconds >= MIN_DURATION_SECONDS) {
-    await sendTrackingData(currentUrl, durationSeconds);
+    // Get latest title and meta description before sending
+    let title = currentTitle || "";
+    let description = "";
+    try {
+      const tab = await chrome.tabs.get(activeTabId);
+      if (tab.title) title = tab.title;
+      description = await getPageMetaDescription(activeTabId);
+    } catch {}
+
+    await sendTrackingData(currentUrl, durationSeconds, title, description);
     console.log(
       `Stopped tracking: ${currentUrl}, Duration: ${durationSeconds}s`
     );
@@ -300,6 +337,7 @@ async function stopTracking() {
   activeTabId = null;
   startTime = null;
   currentUrl = null;
+  currentTitle = null;
   await clearTrackingSession();
 }
 
@@ -328,7 +366,7 @@ async function getXAuthStatus() {
   if (result.xAuth && result.xAuth.jwt) {
     return {
       isLoggedIn: true,
-      user: result.xAuth.user || null,
+      user: result.xAuth.user || null
     };
   }
   return { isLoggedIn: false };
@@ -338,7 +376,7 @@ async function saveXAuthData(data) {
   const authData = {
     jwt: data.jwt,
     refresh_token: data.refresh_token,
-    user: data.user ? JSON.parse(data.user) : null,
+    user: data.user ? JSON.parse(data.user) : null
   };
   await chrome.storage.local.set({ xAuth: authData });
   console.log("X Auth saved:", authData.user?.username);
@@ -359,7 +397,7 @@ async function refreshXToken() {
     const response = await fetch(`${X_AUTH_WORKER_URL}/refresh`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refresh_token: result.xAuth.refresh_token }),
+      body: JSON.stringify({ refresh_token: result.xAuth.refresh_token })
     });
     if (!response.ok) {
       const error = await response.json();
@@ -369,7 +407,7 @@ async function refreshXToken() {
     const authData = await saveXAuthData({
       jwt: tokenData.jwt,
       refresh_token: tokenData.refresh_token || result.xAuth.refresh_token,
-      user: JSON.stringify(tokenData.user),
+      user: JSON.stringify(tokenData.user)
     });
     return { success: true, auth: authData };
   } catch (error) {
@@ -379,7 +417,7 @@ async function refreshXToken() {
 
 // ===== Server-Side Tracking Functions =====
 
-async function sendTrackingData(domain, durationSeconds) {
+async function sendTrackingData(domain, durationSeconds, title, description) {
   try {
     const result = await chrome.storage.local.get(["xAuth"]);
     if (!result.xAuth?.jwt) {
@@ -391,16 +429,20 @@ async function sendTrackingData(domain, durationSeconds) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${result.xAuth.jwt}`,
+        Authorization: `Bearer ${result.xAuth.jwt}`
       },
       body: JSON.stringify({
         domain: domain,
         duration: durationSeconds,
-      }),
+        title: title || "",
+        description: description || ""
+      })
     });
 
     if (response.ok) {
-      console.log(`Sent tracking data to worker: ${domain}, ${durationSeconds}s`);
+      console.log(
+        `Sent tracking data to worker: ${domain}, ${durationSeconds}s`
+      );
     } else {
       const error = await response.json();
       console.error("Failed to send tracking data:", error);
@@ -410,7 +452,7 @@ async function sendTrackingData(domain, durationSeconds) {
         const refreshResult = await refreshXToken();
         if (refreshResult.success) {
           // Retry sending tracking data
-          await sendTrackingData(domain, durationSeconds);
+          await sendTrackingData(domain, durationSeconds, title, description);
         }
       }
     }
@@ -423,7 +465,9 @@ function getStatsUrl() {
   return new Promise(async (resolve) => {
     const result = await chrome.storage.local.get(["xAuth"]);
     if (result.xAuth?.jwt) {
-      resolve(`${X_AUTH_WORKER_URL}/stats?token=${encodeURIComponent(result.xAuth.jwt)}`);
+      resolve(
+        `${X_AUTH_WORKER_URL}/stats?token=${encodeURIComponent(result.xAuth.jwt)}`
+      );
     } else {
       resolve(null);
     }

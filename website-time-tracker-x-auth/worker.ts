@@ -123,6 +123,8 @@ interface IndividualVisit {
   domain: string;
   duration_seconds: number;
   visited_at: string;
+  title: string;
+  description: string;
 }
 
 export class UserStats implements DurableObject {
@@ -143,6 +145,10 @@ export class UserStats implements DurableObject {
       );
       CREATE INDEX IF NOT EXISTS idx_domain ON visits(domain);
     `);
+
+    // Migrate: add title and description columns
+    try { this.sql.exec(`ALTER TABLE visits ADD COLUMN title TEXT NOT NULL DEFAULT ''`); } catch {}
+    try { this.sql.exec(`ALTER TABLE visits ADD COLUMN description TEXT NOT NULL DEFAULT ''`); } catch {}
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -168,9 +174,11 @@ export class UserStats implements DurableObject {
       const body = (await request.json()) as {
         domain: string;
         duration: number;
+        title?: string;
+        description?: string;
       };
 
-      const { domain, duration } = body;
+      const { domain, duration, title, description } = body;
 
       if (!domain || typeof duration !== "number" || duration <= 0) {
         return new Response(
@@ -182,10 +190,12 @@ export class UserStats implements DurableObject {
       const visitedAt = new Date().toISOString();
 
       this.sql.exec(
-        `INSERT INTO visits (domain, duration_seconds, visited_at) VALUES (?, ?, ?)`,
+        `INSERT INTO visits (domain, duration_seconds, visited_at, title, description) VALUES (?, ?, ?, ?, ?)`,
         domain,
         duration,
-        visitedAt
+        visitedAt,
+        title || "",
+        description || ""
       );
 
       return new Response(JSON.stringify({ success: true }), {
@@ -245,7 +255,9 @@ export class UserStats implements DurableObject {
           id,
           domain,
           duration_seconds,
-          visited_at
+          visited_at,
+          title,
+          description
         FROM visits
         ORDER BY visited_at DESC
         LIMIT 1000
@@ -256,6 +268,8 @@ export class UserStats implements DurableObject {
         url: row.domain,
         duration: row.duration_seconds,
         visitedAt: row.visited_at,
+        title: row.title,
+        description: row.description,
       }));
 
       return new Response(JSON.stringify({ visits }), {
@@ -327,6 +341,14 @@ function escapeHtml(text: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
+}
+
+function extractHostname(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url;
+  }
 }
 
 // ===== Main Worker =====
@@ -742,7 +764,7 @@ export default {
       const id = env.USER_STATS.idFromName(payload.sub);
       const stub = env.USER_STATS.get(id);
       const response = await stub.fetch(new Request("https://do/visits"));
-      const visitsData = (await response.json()) as { visits: Array<{ id: number; url: string; duration: number; visitedAt: string }> };
+      const visitsData = (await response.json()) as { visits: Array<{ id: number; url: string; duration: number; visitedAt: string; title: string; description: string }> };
 
       // Build stats HTML - grouped by date
       let statsHtml = "";
@@ -776,15 +798,28 @@ export default {
               minute: '2-digit'
             });
 
+            const titleDisplay = visit.title ? escapeHtml(visit.title) : escapeHtml(visit.url);
+            const descDisplay = visit.description ? `<div class="site-description">${escapeHtml(visit.description)}</div>` : "";
+
+            const hostname = escapeHtml(new URL(visit.url.startsWith('http') ? visit.url : 'https://' + visit.url).hostname);
+            const faviconUrl = `https://www.google.com/s2/favicons?domain=${hostname}&sz=32`;
+
             statsHtml += `
-            <div class="site-entry">
-              <div class="site-info">
-                <div class="site-name">${escapeHtml(visit.url)}</div>
-                <div class="site-details">
-                  ${visitTime} | Duration: ${formatTime(visit.duration)}
+            <div class="site-entry" data-search="${escapeHtml(visit.title?.toLowerCase() || '')} ${escapeHtml(visit.url.toLowerCase())} ${escapeHtml(visit.description?.toLowerCase() || '')}">
+              <a href="${visit.url.startsWith('http') ? escapeHtml(visit.url) : 'https://' + escapeHtml(visit.url)}" target="_blank" rel="noopener noreferrer" class="site-link">
+                <img class="site-favicon" src="${faviconUrl}" alt="" width="28" height="28">
+                <div class="site-info">
+                  <div class="site-name">${titleDisplay}</div>
+                  <div class="site-url">${escapeHtml(visit.url)}</div>
+                  ${descDisplay}
+                  <div class="site-details">
+                    ${visitTime} · ${formatTime(visit.duration)}
+                  </div>
                 </div>
-              </div>
-              <a href="${llmTextUrl}" target="_blank" rel="noopener noreferrer" class="context-btn">Look up context</a>
+              </a>
+              <a href="${llmTextUrl}" target="_blank" rel="noopener noreferrer" class="context-btn" title="Look up context">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><path d="M11 8v6"/><path d="M8 11h6"/></svg>
+              </a>
             </div>`;
           }
 
@@ -844,41 +879,98 @@ export default {
     .stats {
       padding: 0;
     }
-    .site-entry {
-      padding: 15px 20px;
+    .search-bar {
+      padding: 12px 20px;
       border-bottom: 1px solid #eee;
+    }
+    .search-bar input {
+      width: 100%;
+      padding: 10px 14px 10px 36px;
+      border: 1px solid #dfe1e5;
+      border-radius: 24px;
+      font-size: 14px;
+      outline: none;
+      background: #fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%239aa0a6' stroke-width='2'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='M21 21l-4.35-4.35'/%3E%3C/svg%3E") 12px center no-repeat;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    .search-bar input:focus {
+      border-color: #4285f4;
+      box-shadow: 0 1px 6px rgba(66,133,244,0.28);
+    }
+    .search-bar input::placeholder {
+      color: #9aa0a6;
+    }
+    .site-entry {
+      padding: 12px 20px;
+      border-bottom: 1px solid #ebebeb;
       display: flex;
-      justify-content: space-between;
       align-items: center;
+      gap: 12px;
     }
     .site-entry:last-child {
       border-bottom: none;
     }
     .site-entry:hover {
-      background: #f9f9f9;
+      background: #f8f9fa;
+    }
+    .site-link {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      flex: 1;
+      text-decoration: none;
+      color: inherit;
+      min-width: 0;
+    }
+    .site-favicon {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: #f1f3f4;
+      flex-shrink: 0;
+      margin-top: 2px;
     }
     .site-info {
       flex: 1;
+      min-width: 0;
     }
     .site-name {
-      font-weight: 500;
-      color: #333;
-      margin-bottom: 4px;
-      word-break: break-all;
+      font-size: 16px;
+      color: #1a0dab;
+      margin-bottom: 2px;
+      line-height: 1.3;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .site-link:visited .site-name {
+      color: #681da8;
+    }
+    .site-link:hover .site-name {
+      text-decoration: underline;
+    }
+    .site-url {
+      font-size: 12px;
+      color: #202124;
+      margin-bottom: 2px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .site-description {
       font-size: 13px;
+      color: #4d5156;
+      margin-bottom: 2px;
       line-height: 1.4;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
     }
     .site-details {
       font-size: 12px;
-      color: #666;
-    }
-    .time-badge {
-      background: #2196F3;
-      color: white;
-      padding: 6px 12px;
-      border-radius: 16px;
-      font-size: 13px;
-      font-weight: bold;
+      color: #70757a;
+      margin-top: 2px;
     }
     .date-group {
       margin-bottom: 0;
@@ -892,20 +984,409 @@ export default {
       border-bottom: 1px solid #e0e0e0;
       position: sticky;
       top: 0;
+      z-index: 1;
     }
     .context-btn {
-      background: #10b981;
-      color: white;
-      padding: 6px 12px;
-      border-radius: 6px;
-      font-size: 12px;
-      font-weight: 500;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      color: #70757a;
       text-decoration: none;
-      white-space: nowrap;
-      transition: background-color 0.2s;
+      flex-shrink: 0;
+      transition: background-color 0.2s, color 0.2s;
     }
     .context-btn:hover {
-      background: #059669;
+      background: #e8f0fe;
+      color: #1a73e8;
+    }
+    .no-data {
+      text-align: center;
+      color: #999;
+      padding: 40px 20px;
+    }
+    .refresh-note {
+      text-align: center;
+      padding: 15px;
+      font-size: 12px;
+      color: #999;
+      border-top: 1px solid #eee;
+    }
+    .tabs {
+      display: flex;
+      border-bottom: 2px solid #eee;
+      background: #f8f9fa;
+    }
+    .tab {
+      padding: 12px 24px;
+      font-size: 14px;
+      font-weight: 500;
+      color: #666;
+      text-decoration: none;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -2px;
+      transition: color 0.2s, border-color 0.2s;
+    }
+    .tab:hover {
+      color: #333;
+    }
+    .tab.active {
+      color: #2196F3;
+      border-bottom-color: #2196F3;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      ${payload.pfp ? `<img class="user-avatar" src="${payload.pfp}" alt="${payload.name}">` : ""}
+      <div class="user-info">
+        <h1>${payload.name}</h1>
+        <p>@${payload.username}</p>
+      </div>
+    </div>
+    <div class="tabs">
+      <a class="tab active" href="/stats">Activity</a>
+      <a class="tab" href="/daily">Daily Summary</a>
+    </div>
+    <div class="search-bar">
+      <input type="text" id="searchInput" placeholder="Search your browsing history..." autocomplete="off">
+    </div>
+    <div class="stats" id="statsContainer">
+      ${statsHtml}
+    </div>
+    <div class="refresh-note">
+      Refresh this page to see updated stats
+    </div>
+  </div>
+  <script>
+    const input = document.getElementById('searchInput');
+    const container = document.getElementById('statsContainer');
+    const entries = container.querySelectorAll('.site-entry');
+    const dateGroups = container.querySelectorAll('.date-group');
+
+    input.addEventListener('input', function() {
+      const q = this.value.toLowerCase().trim();
+      if (!q) {
+        entries.forEach(e => e.style.display = '');
+        dateGroups.forEach(g => g.style.display = '');
+        return;
+      }
+      dateGroups.forEach(group => {
+        const items = group.querySelectorAll('.site-entry');
+        let anyVisible = false;
+        items.forEach(entry => {
+          const match = entry.dataset.search.includes(q);
+          entry.style.display = match ? '' : 'none';
+          if (match) anyVisible = true;
+        });
+        group.style.display = anyVisible ? '' : 'none';
+      });
+    });
+  </script>
+</body>
+</html>`;
+
+      return new Response(html, {
+        headers: { "Content-Type": "text/html;charset=utf8" },
+      });
+    }
+
+    // GET /daily - Daily summary page grouped by hostname (JWT from query param or cookie)
+    if (url.pathname === "/daily") {
+      const tokenFromQuery = url.searchParams.get("token");
+      const tokenFromCookie = getCookie(request.headers.get("Cookie"), "jwt");
+      const token = tokenFromQuery || tokenFromCookie;
+
+      if (!token) {
+        return new Response(
+          `<!DOCTYPE html>
+<html>
+<head>
+  <title>Not Authorized</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      margin: 0;
+      background: #f5f5f5;
+    }
+    .container {
+      text-align: center;
+      padding: 40px;
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    }
+    h1 { margin: 0 0 8px 0; color: #333; }
+    p { color: #666; margin: 0; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Not Authorized</h1>
+    <p>Please login from the browser extension to view your stats.</p>
+  </div>
+</body>
+</html>`,
+          { status: 401, headers: { "Content-Type": "text/html;charset=utf8" } }
+        );
+      }
+
+      const payload = await verifyJWT(token, env.JWT_SECRET);
+
+      if (!payload) {
+        return new Response(
+          `<!DOCTYPE html>
+<html>
+<head>
+  <title>Invalid Token</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      margin: 0;
+      background: #f5f5f5;
+    }
+    .container {
+      text-align: center;
+      padding: 40px;
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    }
+    h1 { margin: 0 0 8px 0; color: #333; }
+    p { color: #666; margin: 0; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Invalid Token</h1>
+    <p>Your session may have expired. Please login again from the browser extension.</p>
+  </div>
+</body>
+</html>`,
+          { status: 401, headers: { "Content-Type": "text/html;charset=utf8" } }
+        );
+      }
+
+      // If token came from query param, set cookie and redirect to clean URL
+      if (tokenFromQuery) {
+        const headers = new Headers({
+          Location: `${url.origin}/daily`,
+        });
+        headers.append(
+          "Set-Cookie",
+          `jwt=${token}; HttpOnly; Path=/; ${securePart}SameSite=Lax; Max-Age=31536000`
+        );
+        return new Response("Redirecting...", { status: 302, headers });
+      }
+
+      // Get user's visits
+      const id = env.USER_STATS.idFromName(payload.sub);
+      const stub = env.USER_STATS.get(id);
+      const response = await stub.fetch(new Request("https://do/visits"));
+      const visitsData = (await response.json()) as { visits: Array<{ id: number; url: string; duration: number; visitedAt: string; title: string; description: string }> };
+
+      // Build daily summary HTML - grouped by date, then by hostname
+      let dailyHtml = "";
+      if (!visitsData.visits || visitsData.visits.length === 0) {
+        dailyHtml = '<div class="no-data">No websites tracked yet</div>';
+      } else {
+        // Group visits by date, then by hostname
+        const dailyByHostname: Record<string, Record<string, number>> = {};
+        for (const visit of visitsData.visits) {
+          const date = new Date(visit.visitedAt).toLocaleDateString('en-US', {
+            weekday: 'long',
+            year: 'numeric',
+            month: 'long',
+            day: 'numeric'
+          });
+          const hostname = extractHostname(visit.url);
+          if (!dailyByHostname[date]) {
+            dailyByHostname[date] = {};
+          }
+          dailyByHostname[date][hostname] = (dailyByHostname[date][hostname] || 0) + visit.duration;
+        }
+
+        // Build HTML for each date group
+        for (const [date, hostnames] of Object.entries(dailyByHostname)) {
+          // Sort hostnames by total time descending
+          const sorted = Object.entries(hostnames).sort((a, b) => b[1] - a[1]);
+          const dayTotal = sorted.reduce((sum, [, time]) => sum + time, 0);
+
+          dailyHtml += `<div class="date-group">
+            <div class="date-header">
+              <span>${date}</span>
+              <span class="day-total">${formatTime(dayTotal)}</span>
+            </div>`;
+
+          for (const [hostname, totalSeconds] of sorted) {
+            const barWidth = Math.max(2, Math.round((totalSeconds / sorted[0][1]) * 100));
+
+            dailyHtml += `
+            <div class="site-entry">
+              <div class="site-info">
+                <div class="site-name">${escapeHtml(hostname)}</div>
+                <div class="bar-container">
+                  <div class="bar" style="width: ${barWidth}%"></div>
+                </div>
+              </div>
+              <div class="time-badge">${formatTime(totalSeconds)}</div>
+            </div>`;
+          }
+
+          dailyHtml += `</div>`;
+        }
+      }
+
+      const dailyPageHtml = `<!DOCTYPE html>
+<html>
+<head>
+  <title>Website Time Tracker - Daily Summary</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      margin: 0;
+      padding: 20px;
+      background: #f5f5f5;
+      min-height: 100vh;
+    }
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+      overflow: hidden;
+    }
+    .header {
+      padding: 20px;
+      background: #f8f9fa;
+      border-bottom: 1px solid #eee;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .user-avatar {
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      object-fit: cover;
+    }
+    .user-info h1 {
+      margin: 0;
+      font-size: 18px;
+      color: #333;
+    }
+    .user-info p {
+      margin: 4px 0 0 0;
+      font-size: 14px;
+      color: #666;
+    }
+    .tabs {
+      display: flex;
+      border-bottom: 2px solid #eee;
+      background: #f8f9fa;
+    }
+    .tab {
+      padding: 12px 24px;
+      font-size: 14px;
+      font-weight: 500;
+      color: #666;
+      text-decoration: none;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -2px;
+      transition: color 0.2s, border-color 0.2s;
+    }
+    .tab:hover {
+      color: #333;
+    }
+    .tab.active {
+      color: #2196F3;
+      border-bottom-color: #2196F3;
+    }
+    .stats {
+      padding: 0;
+    }
+    .site-entry {
+      padding: 12px 20px;
+      border-bottom: 1px solid #eee;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+    .site-entry:last-child {
+      border-bottom: none;
+    }
+    .site-entry:hover {
+      background: #f9f9f9;
+    }
+    .site-info {
+      flex: 1;
+      min-width: 0;
+    }
+    .site-name {
+      font-weight: 500;
+      color: #333;
+      margin-bottom: 6px;
+      font-size: 14px;
+    }
+    .bar-container {
+      height: 6px;
+      background: #eee;
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .bar {
+      height: 100%;
+      background: #2196F3;
+      border-radius: 3px;
+      transition: width 0.3s;
+    }
+    .time-badge {
+      background: #2196F3;
+      color: white;
+      padding: 6px 12px;
+      border-radius: 16px;
+      font-size: 13px;
+      font-weight: bold;
+      white-space: nowrap;
+    }
+    .date-group {
+      margin-bottom: 0;
+    }
+    .date-header {
+      background: #f0f4f8;
+      padding: 12px 20px;
+      font-weight: 600;
+      color: #555;
+      font-size: 14px;
+      border-bottom: 1px solid #e0e0e0;
+      position: sticky;
+      top: 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .day-total {
+      font-size: 13px;
+      color: #2196F3;
+      font-weight: 700;
     }
     .no-data {
       text-align: center;
@@ -930,8 +1411,12 @@ export default {
         <p>@${payload.username}</p>
       </div>
     </div>
+    <div class="tabs">
+      <a class="tab" href="/stats">Activity</a>
+      <a class="tab active" href="/daily">Daily Summary</a>
+    </div>
     <div class="stats">
-      ${statsHtml}
+      ${dailyHtml}
     </div>
     <div class="refresh-note">
       Refresh this page to see updated stats
@@ -940,7 +1425,7 @@ export default {
 </body>
 </html>`;
 
-      return new Response(html, {
+      return new Response(dailyPageHtml, {
         headers: { "Content-Type": "text/html;charset=utf8" },
       });
     }
@@ -1067,6 +1552,7 @@ export default {
           "/api/track": "Record a visit (POST with JWT)",
           "/api/stats": "Get stats as JSON (GET with JWT)",
           "/stats": "Stats HTML page (GET with JWT token param)",
+          "/daily": "Daily summary by hostname (GET with JWT token param)",
           "/refresh": "Refresh access token (POST with refresh_token)",
         },
       }),
