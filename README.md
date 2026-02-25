@@ -1,4 +1,4 @@
-# An AI Agent That Shares Things You're Working On With Your Team
+# An AI Connector That Knows What You're Up To
 
 Why
 
@@ -21,7 +21,7 @@ Required features
 - Add LLM assessment to not share certain websites based on title/url/description
 - Every night, create an AI-generated summary of what you're up to
 
-Limitations compared to pipedream
+Limitations compared to screenpipe
 
 - doesn't track other programs except chrome
 - doesn't capture important sites like slack, notion, email, or other communication apps unless we create
@@ -38,4 +38,14 @@ How does this differentiate from https://macroscope.com?
 
 ## Value proposition
 
-Similar to rewind!
+Similar to rewind but more accurate.
+
+- Generates AI summary daily of your browsing activity
+- MCP to chat with the `browsing_activity(from,to)` + `search(from,query)` + `get(url)`
+
+Assumption to validate: this is valuable to people:
+
+- find back things you saw previously
+- create a reading list of things to read
+
+Costs ±$10/month.
