@@ -11,6 +11,7 @@ interface Env {
   JWT_SECRET: string;
   PARALLEL_API_KEY: string;
   USER_STATS: DurableObjectNamespace;
+  ADMIN_STATS: DurableObjectNamespace;
 }
 
 // The extension will listen for redirects to this URL pattern
@@ -389,6 +390,164 @@ export class UserStats implements DurableObject {
   }
 }
 
+// ===== AdminStats Durable Object =====
+
+interface AdminUserRow {
+  sub: string;
+  username: string;
+  name: string;
+  pfp: string;
+  iat: number;
+  active_at: string;
+  track_count: number;
+  mcp_tool_call_count: number;
+  mcp_active_at: string;
+}
+
+export class AdminStats implements DurableObject {
+  private sql: SqlStorage;
+
+  constructor(state: DurableObjectState) {
+    this.sql = state.storage.sql;
+    this.initializeSchema();
+  }
+
+  private initializeSchema() {
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS users (
+        sub TEXT PRIMARY KEY,
+        username TEXT NOT NULL,
+        name TEXT NOT NULL,
+        pfp TEXT NOT NULL DEFAULT '',
+        iat INTEGER NOT NULL,
+        active_at TEXT NOT NULL,
+        track_count INTEGER NOT NULL DEFAULT 0,
+        mcp_tool_call_count INTEGER NOT NULL DEFAULT 0,
+        mcp_active_at TEXT NOT NULL DEFAULT ''
+      );
+    `);
+
+    // Migrate: add mcp columns
+    try {
+      this.sql.exec(
+        `ALTER TABLE users ADD COLUMN mcp_tool_call_count INTEGER NOT NULL DEFAULT 0`
+      );
+    } catch {}
+    try {
+      this.sql.exec(
+        `ALTER TABLE users ADD COLUMN mcp_active_at TEXT NOT NULL DEFAULT ''`
+      );
+    } catch {}
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+
+    if (url.pathname === "/upsert-user" && request.method === "POST") {
+      return this.handleUpsertUser(request);
+    }
+
+    if (url.pathname === "/track-activity" && request.method === "POST") {
+      return this.handleTrackActivity(request);
+    }
+
+    if (url.pathname === "/mcp-activity" && request.method === "POST") {
+      return this.handleMcpActivity(request);
+    }
+
+    if (url.pathname === "/users" && request.method === "GET") {
+      return this.handleGetUsers();
+    }
+
+    return new Response("Not found", { status: 404 });
+  }
+
+  private async handleUpsertUser(request: Request): Promise<Response> {
+    const body = (await request.json()) as {
+      sub: string;
+      username: string;
+      name: string;
+      pfp: string;
+      iat: number;
+    };
+
+    const now = new Date().toISOString();
+
+    // Check if user exists
+    const existing = this.sql
+      .exec(`SELECT track_count FROM users WHERE sub = ?`, body.sub)
+      .toArray();
+
+    if (existing.length > 0) {
+      this.sql.exec(
+        `UPDATE users SET username = ?, name = ?, pfp = ?, iat = ?, active_at = ? WHERE sub = ?`,
+        body.username,
+        body.name,
+        body.pfp,
+        body.iat,
+        now,
+        body.sub
+      );
+    } else {
+      this.sql.exec(
+        `INSERT INTO users (sub, username, name, pfp, iat, active_at, track_count) VALUES (?, ?, ?, ?, ?, ?, 0)`,
+        body.sub,
+        body.username,
+        body.name,
+        body.pfp,
+        body.iat,
+        now
+      );
+    }
+
+    return new Response(JSON.stringify({ success: true }), {
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  private async handleTrackActivity(request: Request): Promise<Response> {
+    const body = (await request.json()) as { sub: string };
+    const now = new Date().toISOString();
+
+    this.sql.exec(
+      `UPDATE users SET active_at = ?, track_count = track_count + 1 WHERE sub = ?`,
+      now,
+      body.sub
+    );
+
+    return new Response(JSON.stringify({ success: true }), {
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  private async handleMcpActivity(request: Request): Promise<Response> {
+    const body = (await request.json()) as { sub: string };
+    const now = new Date().toISOString();
+
+    this.sql.exec(
+      `UPDATE users SET mcp_active_at = ?, mcp_tool_call_count = mcp_tool_call_count + 1 WHERE sub = ?`,
+      now,
+      body.sub
+    );
+
+    return new Response(JSON.stringify({ success: true }), {
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  private async handleGetUsers(): Promise<Response> {
+    const rows = this.sql
+      .exec(
+        `SELECT sub, username, name, pfp, iat, active_at, track_count, mcp_tool_call_count, mcp_active_at FROM users ORDER BY active_at DESC`
+      )
+      .toArray() as unknown as AdminUserRow[];
+
+    return new Response(JSON.stringify({ users: rows }), {
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+}
+
 // ===== Helper Functions =====
 
 async function generateRandomString(length: number): Promise<string> {
@@ -590,6 +749,11 @@ async function mcpMiddleware(
 <html>
 <head>
   <title>MCP Authorization</title>
+  <link rel="icon" type="image/png" href="/favicon-96x96.png" sizes="96x96" />
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<link rel="shortcut icon" href="/favicon.ico" />
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+<link rel="manifest" href="/site.webmanifest" />
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #f5f5f5; }
     .container { text-align: center; padding: 40px; background: white; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); max-width: 400px; }
@@ -934,6 +1098,21 @@ async function mcpMiddleware(
         }
 
         case "tools/call": {
+          // Track MCP tool call in admin stats
+          try {
+            const adminId = env.ADMIN_STATS.idFromName("global");
+            const adminStub = env.ADMIN_STATS.get(adminId);
+            adminStub.fetch(
+              new Request("https://do/mcp-activity", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ sub: accessToken.sub }),
+              })
+            );
+          } catch (e) {
+            console.error("Failed to update admin mcp stats:", e);
+          }
+
           const toolName = (body.params as { name: string })?.name;
           const toolArgs =
             (body.params as { arguments?: Record<string, unknown> })
@@ -1252,6 +1431,27 @@ export default {
 
         const jwt = await createJWT(jwtPayload, env.JWT_SECRET);
 
+        // Register/update user in AdminStats
+        try {
+          const adminId = env.ADMIN_STATS.idFromName("global");
+          const adminStub = env.ADMIN_STATS.get(adminId);
+          await adminStub.fetch(
+            new Request("https://do/upsert-user", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                sub: user.id,
+                username: user.username,
+                name: user.name,
+                pfp: jwtPayload.pfp,
+                iat: jwtPayload.iat,
+              }),
+            })
+          );
+        } catch (e) {
+          console.error("Failed to update admin stats:", e);
+        }
+
         // Check if login originated from the website
         const loginSource = getCookie(cookieHeader, "x_login_source");
         if (loginSource === "web") {
@@ -1370,6 +1570,21 @@ export default {
 
       const response = await stub.fetch(doRequest);
       const responseBody = await response.text();
+
+      // Update admin stats (track activity)
+      try {
+        const adminId = env.ADMIN_STATS.idFromName("global");
+        const adminStub = env.ADMIN_STATS.get(adminId);
+        await adminStub.fetch(
+          new Request("https://do/track-activity", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sub: payload.sub }),
+          })
+        );
+      } catch (e) {
+        console.error("Failed to update admin track stats:", e);
+      }
 
       return new Response(responseBody, {
         status: response.status,
@@ -1604,7 +1819,13 @@ export default {
       const html = `<!DOCTYPE html>
 <html>
 <head>
+
   <title>Wilmake History - Stats</title>
+<link rel="icon" type="image/png" href="/favicon-96x96.png" sizes="96x96" />
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<link rel="shortcut icon" href="/favicon.ico" />
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+<link rel="manifest" href="/site.webmanifest" />
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <style>
@@ -1640,6 +1861,7 @@ export default {
       border-radius: 50%;
       object-fit: cover;
     }
+    .user-info { flex: 1; }
     .user-info h1 {
       margin: 0;
       font-size: 18px;
@@ -1828,7 +2050,7 @@ export default {
       <a class="logout-btn" href="/logout">Logout</a>
     </div>
     <div class="tabs">
-      <a class="tab" href="/">Home</a>
+      <a class="tab" href="/">Installation</a>
       <a class="tab active" href="/stats">Activity</a>
       <a class="tab" href="/daily">Daily Summary</a>
     </div>
@@ -2046,6 +2268,11 @@ export default {
 <html>
 <head>
   <title>Wilmake History - Daily Summary</title>
+  <link rel="icon" type="image/png" href="/favicon-96x96.png" sizes="96x96" />
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<link rel="shortcut icon" href="/favicon.ico" />
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+<link rel="manifest" href="/site.webmanifest" />
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <style>
@@ -2081,6 +2308,7 @@ export default {
       border-radius: 50%;
       object-fit: cover;
     }
+    .user-info { flex: 1; }
     .user-info h1 {
       margin: 0;
       font-size: 18px;
@@ -2212,7 +2440,7 @@ export default {
       <a class="logout-btn" href="/logout">Logout</a>
     </div>
     <div class="tabs">
-      <a class="tab" href="/">Home</a>
+      <a class="tab" href="/">Installation</a>
       <a class="tab" href="/stats">Activity</a>
       <a class="tab active" href="/daily">Daily Summary</a>
     </div>
@@ -2341,6 +2569,106 @@ export default {
       }
     }
 
+    // GET /admin - Admin page (janwilmake only)
+    if (url.pathname === "/admin") {
+      const tokenFromCookie = getCookie(request.headers.get("Cookie"), "jwt");
+      const payload = tokenFromCookie
+        ? await verifyJWT(tokenFromCookie, env.JWT_SECRET)
+        : null;
+
+      if (!payload || payload.username !== "janwilmake") {
+        return new Response("Not authorized", { status: 403 });
+      }
+
+      const adminId = env.ADMIN_STATS.idFromName("global");
+      const adminStub = env.ADMIN_STATS.get(adminId);
+      const adminResponse = await adminStub.fetch(
+        new Request("https://do/users")
+      );
+      const adminData = (await adminResponse.json()) as {
+        users: AdminUserRow[];
+      };
+
+      let tableRows = "";
+      for (const user of adminData.users) {
+        const iatDate = new Date(user.iat * 1000).toISOString().split("T")[0];
+        const activeDate = user.active_at
+          ? new Date(user.active_at).toISOString().replace("T", " ").slice(0, 19)
+          : "Never";
+        const mcpActiveDate = user.mcp_active_at
+          ? new Date(user.mcp_active_at).toISOString().replace("T", " ").slice(0, 19)
+          : "Never";
+        tableRows += `<tr>
+          <td>${user.pfp ? `<img src="${escapeHtml(user.pfp)}" width="24" height="24" style="border-radius:50%;vertical-align:middle;margin-right:6px">` : ""}${escapeHtml(user.username)}</td>
+          <td>${escapeHtml(user.name)}</td>
+          <td>${escapeHtml(user.sub)}</td>
+          <td>${iatDate}</td>
+          <td>${activeDate}</td>
+          <td>${user.track_count}</td>
+          <td>${mcpActiveDate}</td>
+          <td>${user.mcp_tool_call_count}</td>
+        </tr>`;
+      }
+
+      const adminHtml = `<!DOCTYPE html>
+<html>
+<head>
+  <title>Admin - Wilmake History</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/png" href="/favicon-96x96.png" sizes="96x96" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="shortcut icon" href="/favicon.ico" />
+  <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+  <link rel="manifest" href="/site.webmanifest" />
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; min-height: 100vh; }
+    .container { max-width: 1100px; margin: 0 auto; background: white; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); overflow: hidden; }
+    .header { padding: 20px; background: #f8f9fa; border-bottom: 1px solid #eee; display: flex; align-items: center; gap: 12px; }
+    .header h1 { margin: 0; font-size: 18px; color: #333; flex: 1; }
+    .back-btn { padding: 8px 16px; background: none; border: 1px solid #ddd; border-radius: 6px; color: #666; font-size: 13px; text-decoration: none; }
+    .back-btn:hover { background: #f5f5f5; color: #333; border-color: #ccc; }
+    .content { padding: 24px; overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th { text-align: left; padding: 10px 12px; background: #f0f4f8; color: #555; font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 2px solid #e0e0e0; }
+    td { padding: 10px 12px; border-bottom: 1px solid #eee; color: #333; }
+    tr:hover td { background: #f9f9f9; }
+    .count { text-align: center; font-size: 16px; color: #999; padding: 40px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>Admin - Users (${adminData.users.length})</h1>
+      <a class="back-btn" href="/">Back</a>
+    </div>
+    <div class="content">
+      ${adminData.users.length === 0 ? '<div class="count">No users yet</div>' : `<table>
+        <thead>
+          <tr>
+            <th>Username</th>
+            <th>Name</th>
+            <th>Sub</th>
+            <th>Signed Up</th>
+            <th>Last Active</th>
+            <th>Tracks</th>
+            <th>MCP Last Active</th>
+            <th>MCP Calls</th>
+          </tr>
+        </thead>
+        <tbody>${tableRows}</tbody>
+      </table>`}
+    </div>
+  </div>
+</body>
+</html>`;
+
+      return new Response(adminHtml, {
+        headers: { "Content-Type": "text/html;charset=utf8" },
+      });
+    }
+
     // GET / - Landing page
     if (url.pathname === "/") {
       const tokenFromCookie = getCookie(request.headers.get("Cookie"), "jwt");
@@ -2355,12 +2683,17 @@ export default {
   <title>Wilmake History</title>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/png" href="/favicon-96x96.png" sizes="96x96" />
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<link rel="shortcut icon" href="/favicon.ico" />
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+<link rel="manifest" href="/site.webmanifest" />
   <style>
     * { box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 0; background: #f5f5f5; min-height: 100vh; display: flex; justify-content: center; align-items: center; }
     .container { max-width: 620px; width: 100%; margin: 20px; }
     .hero { background: white; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); text-align: center; padding: 48px 40px 40px; }
-    .logo { width: 72px; height: 72px; margin-bottom: 16px; }
+    .logo { width: 200px; height: 200px; margin-bottom: 16px; }
     h1 { margin: 0 0 12px 0; color: #333; font-size: 24px; }
     .subtitle { color: #666; margin: 0 0 8px 0; font-size: 15px; line-height: 1.6; }
     .how { color: #999; margin: 0 0 28px 0; font-size: 13px; }
@@ -2384,7 +2717,7 @@ export default {
 <body>
   <div class="container">
     <div class="hero">
-      <img class="logo" src="https://wilmake.com/icon.png" alt="Wilmake History">
+      <img class="logo" src="/icon.png" alt="Wilmake History">
       <h1>Give Your Lobster Your Browser History</h1>
       <p class="subtitle">Your browsing history, collected via a Chrome extension and exposed over MCP and a dashboard UI.</p>
       <p class="how">Install the extension, sign in, and let your AI assistant search your history.</p>
@@ -2438,6 +2771,11 @@ export default {
   <title>Wilmake History</title>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/png" href="/favicon-96x96.png" sizes="96x96" />
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<link rel="shortcut icon" href="/favicon.ico" />
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+<link rel="manifest" href="/site.webmanifest" />
   <style>
     * { box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; min-height: 100vh; }
@@ -2467,6 +2805,13 @@ export default {
     .copy-btn.copied { background: #4CAF50; }
     .iframe-wrapper { margin-top: 16px; display: flex; justify-content: center; }
     .iframe-wrapper iframe { border-radius: 8px; border: 1px solid #e0e0e0; }
+    .step-num { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; background: #2196F3; color: white; border-radius: 50%; font-size: 13px; font-weight: 600; margin-right: 8px; flex-shrink: 0; }
+    .step-title { display: flex; align-items: center; margin: 0 0 12px 0; font-size: 15px; color: #333; font-weight: 600; }
+    .steps ol { margin: 0; padding: 0 0 0 20px; font-size: 14px; color: #555; line-height: 1.8; }
+    .steps ol li { margin-bottom: 4px; }
+    .steps code { background: #f0f0f0; padding: 2px 6px; border-radius: 4px; font-size: 13px; font-family: 'SF Mono', SFMono-Regular, Consolas, monospace; }
+    .steps a { color: #2196F3; text-decoration: none; }
+    .steps a:hover { text-decoration: underline; }
   </style>
 </head>
 <body>
@@ -2478,17 +2823,28 @@ export default {
         <p>@${escapeHtml(payload.username)}</p>
       </div>
       <a class="github-btn" href="https://github.com/janwilmake/browser-history" target="_blank" rel="noopener noreferrer" title="GitHub"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg></a>
+      ${payload.username === "janwilmake" ? '<a class="logout-btn" href="/admin">Admin</a>' : ""}
       <a class="logout-btn" href="/logout">Logout</a>
     </div>
     <div class="tabs">
-      <a class="tab active" href="/">Home</a>
+      <a class="tab active" href="/">Installation</a>
       <a class="tab" href="/stats">Activity</a>
       <a class="tab" href="/daily">Daily Summary</a>
     </div>
-    <div class="content">
+    <div class="content steps">
       <div class="section">
-        <h2>MCP Server</h2>
-        <p>Connect your AI assistant to your browsing history. Use the URL below or install directly.</p>
+        <div class="step-title"><span class="step-num">1</span> Install the Chrome Extension</div>
+        <ol>
+          <li><a href="https://github.com/janwilmake/browser-history/raw/refs/heads/main/chrome-extension.zip" download>Download chrome-extension.zip</a> and unzip it to a folder</li>
+          <li>Open <code>chrome://extensions</code> in Chrome</li>
+          <li>Enable <strong>Developer mode</strong> using the toggle in the top-right corner</li>
+          <li>Click <strong>Load unpacked</strong> and select the unzipped folder</li>
+          <li>The extension will appear in your toolbar - you're all set to start tracking</li>
+        </ol>
+      </div>
+      <div class="section">
+        <div class="step-title"><span class="step-num">2</span> Connect Your AI Assistant</div>
+        <p>Use the MCP server URL below to give your AI assistant access to your browsing history.</p>
         <div class="mcp-url-row">
           <div class="mcp-url" id="mcpUrl">${escapeHtml(mcpUrl)}</div>
           <button class="copy-btn" id="copyBtn" onclick="copyMcpUrl()">Copy</button>
