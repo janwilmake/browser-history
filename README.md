@@ -40,8 +40,8 @@ How does this differentiate from https://macroscope.com?
 
 Similar to rewind but more accurate.
 
-- Generates AI summary daily of your browsing activity
-- MCP to chat with the `browsing_activity(from,to)` + `search(from,query)` + `get(url)`
+- Add in Payments and generates AI summary daily of your browsing activity
+- ✅ MCP to chat with the `browsing_activity(from,to)` + `search(from,query)` + `get(url)`
 
 Assumption to validate: this is valuable to people:
 

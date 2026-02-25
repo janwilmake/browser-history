@@ -3,6 +3,7 @@
   "name": "website-time-tracker-x-auth",
   "compatibility_date": "2025-01-01",
   "main": "worker.ts",
+  "assets": { "directory": "./public" },
   "durable_objects": {
     "bindings": [
       {
