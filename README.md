@@ -1,8 +1,10 @@
 # Browser History — An AI Connector That Knows What You're Up To
 
-![](example.gif)
+![](worker/public/icon.png)
 
 A Chrome extension that tracks your browsing activity (URLs, titles, time spent) and syncs it to a server — giving AI tools the context they need to actually help you.
+
+![](example.gif)
 
 ## Why
 
@@ -64,29 +66,13 @@ Download `chrome-extension.zip` from this repo, unzip, and load as unpacked exte
 
 ### vs [Screenpipe](https://screenpi.pe)
 
-| | Browser History | Screenpipe |
-|---|---|---|
-| **Scope** | Chrome only | All programs + screen |
-| **Data quality** | Structured: full URL, title, description, exact time on site | OCR-based screen captures |
-| **Privacy model** | Team-oriented shared context | Privacy-first local storage |
-| **Install** | Chrome extension + X login | Desktop app install |
+|                   | Browser History                                              | Screenpipe                  |
+| ----------------- | ------------------------------------------------------------ | --------------------------- |
+| **Scope**         | Chrome only                                                  | All programs + screen       |
+| **Data quality**  | Structured: full URL, title, description, exact time on site | OCR-based screen captures   |
+| **Privacy model** | Team-oriented shared context                                 | Privacy-first local storage |
+| **Install**       | Chrome extension + X login                                   | Desktop app install         |
 
 ### vs [Macroscope](https://macroscope.com)
 
 - Broader understanding of what someone is working on, beyond just code
-
-## Roadmap
-
-- [x] Track URLs with title, description, and time spent
-- [x] X (Twitter) OAuth login
-- [x] MCP integration (`search` + `fetch` tools)
-- [ ] Markdown extraction for accessible pages
-- [ ] Private `llms.txt` directory of your browsing activity
-- [ ] AI-powered daily summary of what you're working on
-- [ ] Team pricing + invite system for shared context
-- [ ] IDP integration for private sites (GitHub, Notion, X)
-- [ ] LLM-based filtering to auto-hide sensitive URLs
-
-## License
-
-Open source. See repo for details.

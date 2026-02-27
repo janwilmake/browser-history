@@ -26,7 +26,7 @@ The fix: passively track your browsing with rich metadata — URLs, titles, desc
 
 Then expose it to AI via MCP tools.
 
-Now you can just *ask*: "What was that article about vector databases I read on Tuesday?"
+Now you can just _ask_: "What was that article about vector databases I read on Tuesday?"
 
 Perfect memory. Zero effort.
 
@@ -72,7 +72,7 @@ Some details I'm proud of:
 
 vs Screenpipe: they capture everything on screen via OCR. Powerful but heavy.
 
-This is the opposite approach — lightweight, Chrome-only, but the data is *structured*. Clean URLs, exact time-on-site, real page metadata. No fuzzy text extraction.
+This is the opposite approach — lightweight, Chrome-only, but the data is _structured_. Clean URLs, exact time-on-site, real page metadata. No fuzzy text extraction.
 
 ---
 
@@ -93,6 +93,6 @@ The goal: never lose track of something you've seen online again.
 
 Your browsing is already a goldmine of context — it just needs to be accessible.
 
-Open source → github.com/[your-repo]
+Open source → github.com/janwilmake/browser-history
 
 ---
