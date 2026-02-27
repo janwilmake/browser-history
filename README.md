@@ -1,6 +1,6 @@
 # Browser History — An AI Connector That Knows What You're Up To
 
-![](worker/public/icon.png)
+![](worker/public/web-app-manifest-512x512.png)
 
 A Chrome extension that tracks your browsing activity (URLs, titles, time spent) and syncs it to a server — giving AI tools the context they need to actually help you.
 
